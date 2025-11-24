@@ -1,0 +1,9 @@
+server:
+  port: 4042
+spring:
+  application:
+    name: gis-api
+  profiles:
+    active: dev
+
+
