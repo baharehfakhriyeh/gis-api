@@ -5,13 +5,13 @@ import org.springframework.stereotype.Service;
 
 @Service
 public class KafkaProducer {
-    private final KafkaTemplate<String, String> kafkaTemplate;
+    private final KafkaTemplate<String, byte[]> kafkaTemplate;
 
-    public KafkaProducer(KafkaTemplate<String, String> kafkaTemplate) {
+    public KafkaProducer(KafkaTemplate<String, byte[]> kafkaTemplate) {
         this.kafkaTemplate = kafkaTemplate;
     }
 
-    public void send(String topic, String message){
-        kafkaTemplate.send(topic, message);
+    public void send(String topic, String key, byte[] message){
+        kafkaTemplate.send(topic, key, message);
     }
 }
