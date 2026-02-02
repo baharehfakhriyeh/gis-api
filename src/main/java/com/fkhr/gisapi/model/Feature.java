@@ -1,11 +1,13 @@
 package com.fkhr.gisapi.model;
 
+import com.fkhr.gisapi.config.GisProperties;
 import io.hypersistence.utils.hibernate.type.json.JsonType;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
 import org.hibernate.annotations.Type;
 import org.locationtech.jts.geom.Geometry;
+import org.springframework.beans.factory.annotation.Autowired;
 
 import java.time.LocalDateTime;
 import java.util.Map;
@@ -46,6 +48,9 @@ public class Feature {
     }
 
     public String getOwner() {
+        if(owner == null){
+            return "";
+        }
         return owner;
     }
 
@@ -54,6 +59,10 @@ public class Feature {
     }
 
     public String getDescription() {
+        if(description == null)
+        {
+            description = "";
+        }
         return description;
     }
 

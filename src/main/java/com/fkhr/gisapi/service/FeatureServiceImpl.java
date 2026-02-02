@@ -2,9 +2,10 @@ package com.fkhr.gisapi.service;
 
 
 import com.fkhr.gisapi.*;
+import com.fkhr.gisapi.config.GisProperties;
 import com.fkhr.gisapi.kafka.GroupIds;
-import com.fkhr.gisapi.kafka.KafkaStreamFactory;
 import com.fkhr.gisapi.kafka.KafkaProducer;
+import com.fkhr.gisapi.kafka.KafkaStreamFactory;
 import com.fkhr.gisapi.kafka.Topics;
 import com.fkhr.gisapi.model.Feature;
 import com.fkhr.gisapi.repository.FeatureRepository;
@@ -13,17 +14,22 @@ import com.fkhr.gisapi.utils.CustomException;
 import com.fkhr.gisapi.utils.GeometryConverter;
 import com.fkhr.gisapi.utils.ProtoUtils;
 import com.google.protobuf.Struct;
+import com.google.protobuf.Timestamp;
 import io.grpc.stub.ServerCallStreamObserver;
 import io.grpc.stub.StreamObserver;
+import org.springframework.boot.info.InfoProperties;
 import org.springframework.grpc.server.service.GrpcService;
 import org.springframework.kafka.listener.ConcurrentMessageListenerContainer;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Stream;
 
 @GrpcService
 public class FeatureServiceImpl extends FeatureServiceGrpc.FeatureServiceImplBase {
@@ -31,13 +37,15 @@ public class FeatureServiceImpl extends FeatureServiceGrpc.FeatureServiceImplBas
     private final FeatureRepository featureRepository;
     private final KafkaProducer kafkaProducer;
     private final KafkaStreamFactory kafkaSTreamFactory;
+    private final GisProperties gisProperties;
 
     public FeatureServiceImpl(GeometryConverter geometryConverter, FeatureRepository featureRepository,
-                              KafkaProducer kafkaProducer, KafkaStreamFactory kafkaSTreamFactory) {
+                              KafkaProducer kafkaProducer, KafkaStreamFactory kafkaSTreamFactory, GisProperties gisProperties) {
         this.geometryConverter = geometryConverter;
         this.featureRepository = featureRepository;
         this.kafkaProducer = kafkaProducer;
         this.kafkaSTreamFactory = kafkaSTreamFactory;
+        this.gisProperties = gisProperties;
     }
 
     @Override
@@ -50,19 +58,18 @@ public class FeatureServiceImpl extends FeatureServiceGrpc.FeatureServiceImplBas
             sendFeatureToKafka(featureResponseDto);
         } catch (Exception exception) {
             responseObserver.onError(exception);
-        }
-        finally {
+        } finally {
             responseObserver.onCompleted();
         }
     }
 
-    private void sendFeatureToKafka(FeatureResponseDto feature){
+    private void sendFeatureToKafka(FeatureResponseDto feature) {
         byte[] featureBytes = feature.toByteArray();
         kafkaProducer.send(Topics.FEATURE, feature.getOwner(), featureBytes);
     }
 
     @Override
-    public void getFeature(FeatureId request, StreamObserver<FeatureResponseDto> responseObserver){
+    public void getFeature(FeatureId request, StreamObserver<FeatureResponseDto> responseObserver) {
         try {
             Optional<Feature> featureOptional = featureRepository.findById(UUID.fromString(request.getId()));
             if (featureOptional.isPresent()) {
@@ -75,9 +82,46 @@ public class FeatureServiceImpl extends FeatureServiceGrpc.FeatureServiceImplBas
             }
         } catch (Exception exception) {
             responseObserver.onError(exception);
-        }
-        finally {
+        } finally {
             responseObserver.onCompleted();
+        }
+    }
+
+    @Override
+    public void getFeatureByOwner(GetFeatureByOwnerRequestDto request, StreamObserver<FeatureResponseDto> responseObserver) {
+        try {
+
+            Optional<Feature> featureOptional = featureRepository.findTopByOwnerOrderByTimestampDesc(request.getOwner());
+            if (featureOptional.isPresent()) {
+                Feature feature = featureOptional.get();
+                FeatureResponseDto featureResponseDto = convertFeatureToFeatureResponseDto(feature);
+                responseObserver.onNext(featureResponseDto);
+                responseObserver.onCompleted();
+            } else {
+                throw new CustomException(CustomError.FEATURE_NOT_FOUND);
+            }
+        } catch (Exception exception) {
+            responseObserver.onError(exception);
+        } finally {
+            responseObserver.onCompleted();
+        }
+    }
+
+    @Transactional(readOnly = true)
+    @Override
+    public void getFeaturesInArea(GetFeaturesInAreaRequestDto request, StreamObserver<FeatureResponseDto> responseObserver) {
+        try {
+            org.locationtech.jts.geom.Geometry area = geometryConverter.fromProto(request.getGeometry());
+            area.setSRID(gisProperties.getSrid());
+            try (Stream<Feature> featureStream = featureRepository.streamFeaturesIntersecting(area)) {
+                featureStream.forEach((feature) -> {
+                    FeatureResponseDto featureResponseDto = convertFeatureToFeatureResponseDto(feature);
+                    responseObserver.onNext(featureResponseDto);
+                });
+            }
+            responseObserver.onCompleted();
+        }catch (Exception exeption){
+            responseObserver.onError(exeption);
         }
     }
 
@@ -95,6 +139,7 @@ public class FeatureServiceImpl extends FeatureServiceGrpc.FeatureServiceImplBas
                 true);
     }
 
+
     private void getFeatureLocationConsumerStream(GetFeatureLocationStreamRequestDto request,
                                                   ServerCallStreamObserver<FeatureResponseDto> responseObserver,
                                                   boolean consumeHistory) {
@@ -111,7 +156,7 @@ public class FeatureServiceImpl extends FeatureServiceGrpc.FeatureServiceImplBas
         String owner = request.getOwner();
 
         ConcurrentMessageListenerContainer<String, byte[]> container = kafkaSTreamFactory.createFilteredContainer(
-                  Topics.FEATURE, GroupIds.GIS_BRIDGE, owner, serverObserver, consumeHistory
+                Topics.FEATURE, GroupIds.GIS_BRIDGE, owner, serverObserver, consumeHistory
         );
         container.start();
 
@@ -134,7 +179,7 @@ public class FeatureServiceImpl extends FeatureServiceGrpc.FeatureServiceImplBas
         });
     }
 
-    private Feature convertCreateFeatureRequestDtoToFeature(CreateFeatureRequestDto createFeatureRequestDto){
+    private Feature convertCreateFeatureRequestDtoToFeature(CreateFeatureRequestDto createFeatureRequestDto) {
         org.locationtech.jts.geom.Geometry geometry = geometryConverter.fromProto(createFeatureRequestDto.getGeometry());
         Map<String, Object> properties = ProtoUtils.structToMap(createFeatureRequestDto.getProperties());
         Feature feature = new Feature(UUID.randomUUID(), createFeatureRequestDto.getOwner(),
@@ -143,7 +188,7 @@ public class FeatureServiceImpl extends FeatureServiceGrpc.FeatureServiceImplBas
         return feature;
     }
 
-    private Feature convertFeatureRequestDtoToFeature(FeatureRequestDto featureRequestDto){
+    private Feature convertFeatureRequestDtoToFeature(FeatureRequestDto featureRequestDto) {
         org.locationtech.jts.geom.Geometry geometry = geometryConverter.fromProto(featureRequestDto.getGeometry());
         Map<String, Object> properties = ProtoUtils.structToMap(featureRequestDto.getProperties());
         Feature feature = new Feature(UUID.fromString(featureRequestDto.getId()), featureRequestDto.getOwner(),
@@ -152,7 +197,7 @@ public class FeatureServiceImpl extends FeatureServiceGrpc.FeatureServiceImplBas
         return feature;
     }
 
-    private FeatureResponseDto convertFeatureToFeatureResponseDto(Feature feature){
+    private FeatureResponseDto convertFeatureToFeatureResponseDto(Feature feature) {
         Geometry geometry = geometryConverter.toProto(feature.getGeometry());
         Struct properties = ProtoUtils.mapToStruct(feature.getProperties());
 
@@ -161,7 +206,7 @@ public class FeatureServiceImpl extends FeatureServiceGrpc.FeatureServiceImplBas
                 .setOwner(feature.getOwner())
                 .setDescription(feature.getDescription())
                 .setGeometry(geometry)
-                .setTimestamp(feature.getTimestamp().toString())
+                .setTimestamp(feature.getTimestamp() != null ? feature.getTimestamp().toString() : "")
                 .setProperties(properties).build();
         return featureResponseDto;
     }

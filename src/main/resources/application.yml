@@ -5,5 +5,7 @@ spring:
     name: gis-api
   profiles:
     active: dev
+gis:
+  srid: 4326
 
 
